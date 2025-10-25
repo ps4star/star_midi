@@ -550,14 +550,10 @@ parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator := context.allocat
     }
 
     // If we've already exhausted all tracks in the MIDI, return nil
-    num_valid_tracks := 0
     for p in this.track_ptrs {
-        if p >= 0 {
-            num_valid_tracks += 1
+        if p < 0 {
+            return nil, .MIDI_EXHAUSTED_TRACKS
         }
-    }
-    if num_valid_tracks <= 0 {
-        return nil, .MIDI_EXHAUSTED_TRACKS
     }
 
     this.absolute_clock += seconds
