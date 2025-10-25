@@ -153,8 +153,11 @@ main :: proc() {
 Tested with 100KB MIDI file with 12 tracks (flags: `-o:speed -disable-assert -no-bounds-check`)
 
 AMD Ryzen 5 7530U 12-core 2.00GHz Laptop
+
 Real-time parsing (16.67ms chunks until finished): __~1.96 msec__
+
 Real-time parsing (single 16.67ms frame): __0.1 to 0.5 usec__ (first frame __~20 usec__)
+
 Entire-file-at-once parsing: __~587 usec__
 
 ## License
