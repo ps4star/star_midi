@@ -580,7 +580,7 @@ parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator := context.allocat
             if this.next_event_clocks[cur_track] >= time_in_seconds {
                 // Fire event
                 ev, ev_err := consume_event(this)
-                // ev.time = clamp(this.next_event_clocks[cur_track] - time_in_seconds, 0, 1)
+                ev.time = clamp((this.next_event_clocks[cur_track] - time_in_seconds) / seconds, 0, 1)
                 if ev_err != .NONE {
                     return nil, ev_err
                 }
