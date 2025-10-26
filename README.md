@@ -131,7 +131,7 @@ main :: proc() {
 }
 ```
 
-`dump_json([][dynamic]MIDI_Event)` - Useful utility proc for dumping `parse_entire_file` results
+`dump_json([][dynamic]MIDI_Event, out_file_name)` - Useful utility proc for dumping `parse_entire_file` results
 
 ```odin
 import sm "./star_midi"
@@ -144,7 +144,7 @@ main :: proc() {
 
     data, err_code := sm.parse_entire_file(&parser, context.allocator)
     assert(err_code == .NONE)
-    sm.dump_json(data)
+    sm.dump_json(data, "dump.json")
 }
 ```
 
