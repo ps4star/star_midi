@@ -4,11 +4,11 @@ Simple MIDI file parser in Odin.
 
 ## Usage
 
-It's just 1 file lol. Copy/paste `star_midi.odin` into your project to use it. Make sure it's in its own folder so that it's recognized as a separate module.
+Copy/paste `star_midi.odin` into your project to use it. Make sure it's in its own folder so that it's recognized as a separate module.
 
 ## API
 
-This library contains only __seven__ procs, which should cover most things you'd want to do with MIDI.
+This library contains only __eight__ procs, which should cover most things you'd want to do with MIDI.
 
 `init(^MIDI, full_path_of_file)` - Initailizes MIDI from file
 
@@ -102,6 +102,30 @@ main :: proc() {
     sm.seek(&parser, 0)
 
     // Grab first 3 seconds of data from beginning again
+    data, err_code = sm.parse_realtime(&parser, 3)
+    assert(err_code == .NONE)
+}
+```
+
+`fast_forward(^MIDI, offset_from_now)` - Seeks to a given offset from current position
+
+```odin
+import sm "./star_midi"
+
+parser: sm.MIDI
+
+main :: proc() {
+    // ...
+    // Assume we've already called parser_init*(&parser...)
+
+    // Grab first 10 seconds of data
+    data, err_code := sm.parse_realtime(&parser, 10)
+    assert(err_code == .NONE)
+
+    // Jump ahead by 5 seconds
+    sm.fast_forward(&parser, 5)
+
+    // Grab the next 3 seconds
     data, err_code = sm.parse_realtime(&parser, 3)
     assert(err_code == .NONE)
 }

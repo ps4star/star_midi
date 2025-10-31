@@ -34,11 +34,11 @@ Error_Code :: enum {
     DUMP_UNKNOWN_FORMAT,
 }
 
-MIDI_Format :: enum u16be { // Parity with actual midi spec
-    SINGLE_TRACK = 0,
-    MULTI_TRACK = 1,
-    MULTI_SONG = 2,
-}
+// MIDI_Format :: enum u16be { // Parity with actual midi spec
+//     SINGLE_TRACK = 0,
+//     MULTI_TRACK = 1,
+//     MULTI_SONG = 2,
+// }
 
 MIDI_NoteOffEvent :: struct { channel, key, velocity: u8, }
 MIDI_NoteOnEvent :: struct { channel, key, velocity: u8, }
@@ -107,8 +107,8 @@ MIDI :: struct {
     past_header_ptr: int,
     track_ptrs, initial_track_ptrs: []int,
 
-    midi_format: MIDI_Format,
-    num_tracks_expected: int,
+    // midi_format: MIDI_Format,
+    num_tracks: int,
 
     absolute_clock: Float,
     next_event_clocks: []Float, // <num_track>-sized list
@@ -117,9 +117,9 @@ MIDI :: struct {
     realtime_cache: [][dynamic]MIDI_Event,
 
     // Tempo
-    delta_timing: int,
-    microseconds_per_tick: int,
-    tick_length_microseconds: Float,
+    division_method: enum { TICKS_PER_QUARTER_NOTE, SMPTE, },
+    division_value: Float, // TPQN->"delta time units per quarter note", SMPTE->"microseconds per tick"
+    tempo: Float,
 
     running_status: u8,
     allocator: runtime.Allocator,
@@ -190,7 +190,13 @@ MIDI :: struct {
 
 @private midi_time_to_seconds :: proc(this: ^MIDI, midi_time: int) -> (Float) {
     assert(this != nil)
-    return Float(midi_time) * (Float(this.microseconds_per_tick) / 1_000_000) / Float(this.delta_timing)
+    if this.division_method == .TICKS_PER_QUARTER_NOTE {
+        tpqn := this.division_value // Time units per quarter note
+        return (Float(midi_time) / tpqn) * (Float(this.tempo) / 1_000_000)
+    } else {
+        smpte_time := this.division_value // How many time units make up 1 second
+        return (Float(midi_time) / smpte_time) * (Float(this.tempo) / 1_000_000)
+    }
 }
 
 @private consume_event :: proc(this: ^MIDI) -> (ev: MIDI_Event, err: Error_Code) {
@@ -299,8 +305,7 @@ MIDI :: struct {
                 byte_1 := u32(consume_int(this, u8))
                 byte_0 := u32(consume_int(this, u8))
                 final_val := (byte_2 << 16) | (byte_1 << 8) | byte_0
-                this.microseconds_per_tick = int(Float(final_val))
-                sync_tempo(this)
+                this.tempo = Float(final_val)
                 ev.variant = MIDI_SetTempoEvent{
                     microseconds_per_quarter_note = final_val,
                 }
@@ -439,12 +444,6 @@ MIDI :: struct {
     return
 }
 
-// Call this after you modify tempo
-@private sync_tempo :: proc(this: ^MIDI) {
-    assert(this != nil)
-    this.tick_length_microseconds = Float(this.microseconds_per_tick) / Float(this.delta_timing)
-}
-
 // Sets up parser state and points it to the MIDI file for parsing
 init_from_memory :: proc(this: ^MIDI, src: []byte, allocator := context.allocator) -> (Error_Code) {
     assert(this != nil)
@@ -452,7 +451,7 @@ init_from_memory :: proc(this: ^MIDI, src: []byte, allocator := context.allocato
     this.allocator = allocator
     this.src = src
 
-    this.microseconds_per_tick = 500_000 // Default value until set by meta event
+    this.tempo = 500_000
 
     // Go ahead and grab "MThd" chunk data up front
     if !seek_until_chunk_title(this, { 'M', 'T', 'h', 'd' }) {
@@ -466,26 +465,26 @@ init_from_memory :: proc(this: ^MIDI, src: []byte, allocator := context.allocato
     if specified_fmt < 0 || specified_fmt > 2 {
         return .MIDI_INVALID_FORMAT
     }
-    this.midi_format = MIDI_Format(specified_fmt)
+    // this.midi_format = MIDI_Format(specified_fmt)
     tracks_expected := consume_int(this, u16be)
     if tracks_expected == 0 {
         return .MIDI_NO_TRACKS
     }
-    this.num_tracks_expected = cast(int) tracks_expected
+    this.num_tracks = cast(int) tracks_expected
 
     // Handle delta time value
-    delta_timing := consume_int(this, u16be)
-    if delta_timing == 0 {
+    ticks_per_quarter_note := consume_int(this, u16be)
+    if ticks_per_quarter_note == 0 {
         return .MIDI_INVALID_DELTA_TIMING
     }
-    if delta_timing & 0x8000 == 0 {
+    if ticks_per_quarter_note & 0x8000 == 0 {
         // Ticks per beat method
-        this.delta_timing = int(delta_timing)
-        sync_tempo(this)
+        this.division_method = .TICKS_PER_QUARTER_NOTE
+        this.division_value = Float(ticks_per_quarter_note)
     } else {
         // SMPTE timing method
-        hi_value := (delta_timing & 0b0111_1111__0000_0000) >> 8
-        lo_value := (delta_timing & 0b0000_0000__1111_1111)
+        hi_value := (ticks_per_quarter_note & 0b0111_1111__0000_0000) >> 8
+        lo_value := (ticks_per_quarter_note & 0b0000_0000__1111_1111)
         if hi_value > 30 || hi_value < 24 || (hi_value > 25 && hi_value < 29) {
             return .MIDI_INVALID_DELTA_TIMING
         }
@@ -496,16 +495,16 @@ init_from_memory :: proc(this: ^MIDI, src: []byte, allocator := context.allocato
         } else {
             calc_hi_value = Float(hi_value)
         }
-        this.tick_length_microseconds = Float(1_000_000) / (calc_hi_value * Float(lo_value))
-        sync_tempo(this)
+        this.division_method = .SMPTE
+        this.division_value = calc_hi_value * Float(lo_value)
     }
     this.past_header_ptr = this.src_ptr // Points to first "MTrk" in the file
 
     // Setup our individual track ptrs by scanning file
-    this.track_ptrs = make([]int, this.num_tracks_expected, allocator)
-    this.initial_track_ptrs = make([]int, this.num_tracks_expected, allocator)
-    this.next_event_clocks = make([]Float, this.num_tracks_expected, allocator)
-    for i in 0..<this.num_tracks_expected {
+    this.track_ptrs = make([]int, this.num_tracks, allocator)
+    this.initial_track_ptrs = make([]int, this.num_tracks, allocator)
+    this.next_event_clocks = make([]Float, this.num_tracks, allocator)
+    for i in 0..<this.num_tracks {
         if !seek_until_chunk_title(this, { 'M', 'T', 'r', 'k' }) {
             return .MIDI_MORE_TRACKS_THAN_EXPECTED
         }
@@ -532,18 +531,18 @@ init :: proc(this: ^MIDI, fullpath: string, allocator := context.allocator) -> (
 // Pass in the number of seconds you want the parser to advance,
 // and it will return a num_tracks-sized list containing lists of MIDI events that were
 // 'fired' during the given time interval
-parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator := context.allocator, no_alloc := false) -> ([][dynamic]MIDI_Event, Error_Code) {
+parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator: runtime.Allocator, no_alloc := false) -> ([][dynamic]MIDI_Event, Error_Code) {
     assert(this != nil)
     cur_track := 0
 
     if !no_alloc {
         if this.realtime_cache == nil {
-            this.realtime_cache = make([][dynamic]MIDI_Event, this.num_tracks_expected, allocator)
-            for cur_track in 0..<this.num_tracks_expected {
+            this.realtime_cache = make([][dynamic]MIDI_Event, this.num_tracks, allocator)
+            for cur_track in 0..<this.num_tracks {
                 this.realtime_cache[cur_track] = make([dynamic]MIDI_Event, 0, 64, allocator)
             }
         } else {
-            for cur_track in 0..<this.num_tracks_expected {
+            for cur_track in 0..<this.num_tracks {
                 clear(&this.realtime_cache[cur_track])
             }
         }
@@ -557,7 +556,7 @@ parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator := context.allocat
     }
 
     this.absolute_clock += seconds
-    for cur_track < this.num_tracks_expected {
+    for cur_track < this.num_tracks {
         if this.track_ptrs[cur_track] < 0 {
             cur_track += 1
             continue
@@ -565,9 +564,7 @@ parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator := context.allocat
         this.next_event_clocks[cur_track] += seconds
         this.src_ptr = this.track_ptrs[cur_track]
 
-        // Keep pulling events from the track until 
         for {
-            // fmt.println("PEEK VLQ", this.src_ptr)
             time_before_next_event, err := peek_vlq(this)
             if err != .NONE {
                 return nil, err
@@ -576,7 +573,11 @@ parse_realtime :: proc(this: ^MIDI, seconds: Float, allocator := context.allocat
             if this.next_event_clocks[cur_track] >= time_in_seconds {
                 // Fire event
                 ev, ev_err := consume_event(this)
-                ev.time = clamp((this.next_event_clocks[cur_track] - time_in_seconds) / seconds, 0, 1)
+                if seconds <= 0 || time_in_seconds <= 0 {
+                    ev.time = 0
+                } else {
+                    ev.time = clamp((seconds - (this.next_event_clocks[cur_track] - time_in_seconds)) / seconds, 0, 1)
+                }
                 if ev_err != .NONE {
                     return nil, ev_err
                 }
@@ -606,7 +607,7 @@ parse_entire_file :: proc(this: ^MIDI, allocator := context.allocator) -> ([][dy
 
     seek(this, 0)
     cur_track := 0
-    out := make([][dynamic]MIDI_Event, this.num_tracks_expected, allocator)
+    out := make([][dynamic]MIDI_Event, this.num_tracks, allocator)
     for this.src_ptr < len(this.src) {
         if !seek_until_chunk_title(this, { 'M', 'T', 'r', 'k' }) {
             seek(this, 0)
@@ -614,7 +615,7 @@ parse_entire_file :: proc(this: ^MIDI, allocator := context.allocator) -> ([][dy
         }
 
         out[cur_track] = make([dynamic]MIDI_Event, 0, 512, allocator)
-        if cur_track > this.num_tracks_expected {
+        if cur_track > this.num_tracks {
             seek(this, 0)
             return nil, .MIDI_MORE_TRACKS_THAN_EXPECTED
         }
@@ -622,8 +623,6 @@ parse_entire_file :: proc(this: ^MIDI, allocator := context.allocator) -> ([][dy
         begin_track_src_ptr := this.src_ptr
 
         for this.src_ptr < (begin_track_src_ptr + bytes_after_this) {
-            fmt.println("PEEK VLQ", this.src_ptr)
-            if true{os.exit(0)}
             ev, ev_err := consume_event(this)
             if ev_err != .NONE {
                 seek(this, 0)
@@ -644,11 +643,12 @@ seek :: proc(this: ^MIDI, offset: Float) {
     assert(this != nil)
     this.src_ptr = this.past_header_ptr
     this.absolute_clock = 0.0
+    this.tempo = 500_000
     for &nec in this.next_event_clocks { nec = 0.0 }
     for &p, i in this.track_ptrs { p = this.initial_track_ptrs[i] }
 
     if offset > 0 {
-        parse_realtime(this, offset, no_alloc=true)
+        parse_realtime(this, offset, runtime.nil_allocator(), no_alloc=true)
     }
 }
 
@@ -657,7 +657,12 @@ rewind :: proc(this: ^MIDI, offset: Float) {
     seek(this, this.absolute_clock - offset)
 }
 
-dump_json :: proc(data: [][dynamic]MIDI_Event, path: string, allocator := context.temp_allocator) {
+fast_forward :: proc(this: ^MIDI, offset: Float) {
+    assert(this != nil)
+    seek(this, this.absolute_clock + offset)
+}
+
+dump_json :: proc(data: [][dynamic]MIDI_Event, path: string, allocator: runtime.Allocator) {
     data, marshal_err := json.marshal(data, { pretty = true, use_enum_names = true, }, allocator)
     if data != nil {
         if os.exists(path) {
